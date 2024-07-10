@@ -155,12 +155,20 @@ def handle_place_initial_troop(game: Game, bot_state: BotState, query: QueryPlac
         game.state.get_territories_owned_by(game.state.me.player_id)
     )
 
-    # We will place a troop in the border territory with the least troops currently
-    # on it. This should give us close to an equal distribution.
-    border_territory_models = [game.state.territories[x] for x in border_territories]
-    min_troops_territory = min(border_territory_models, key=lambda x: x.troops)
+    # Calculate threat levels for all border territories
+    threat_levels = {territory: get_threat_territory(game, bot_state, territory) for territory in border_territories}
 
-    return game.move_place_initial_troop(query, min_troops_territory.territory_id)
+    # Calculate priority scores for each border territory
+    priority_scores = {}
+    for territory in border_territories:
+        troops = game.state.territories[territory].troops
+        threat = threat_levels[territory]
+        priority_scores[territory] = threat / (troops + 1)  # Adding 1 to avoid division by zero
+
+    # Find the territory with the highest priority score
+    max_priority_territory = max(priority_scores.items(), key=lambda item: item[1])[0]
+
+    return game.move_place_initial_troop(query, max_priority_territory)
 
 
 def handle_redeem_cards(game: Game, bot_state: BotState, query: QueryRedeemCards) -> MoveRedeemCards:
@@ -202,6 +210,8 @@ def scale(value, input_min=0, input_max=100, output_min=0, output_max=50):
 
 def get_threat_territory(game: Game, bot_state: BotState, territory:int)-> float:
 
+    my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
+
     continent_bonuses = {
         'AS': 7,
         'NA': 5,
@@ -234,8 +244,9 @@ def get_threat_territory(game: Game, bot_state: BotState, territory:int)-> float
     strategic_position = 0 #10
 
     for i in adjacent_territories:
-        strength = game.state.territories[adjacent_territories[i]].troops
-        adjacent_strength += strength
+        if i not in my_territories:
+            strength = game.state.territories[i].troops
+            adjacent_strength += strength
     
     if territory in chokepoints:
         strategic_position = 10
@@ -244,9 +255,9 @@ def get_threat_territory(game: Game, bot_state: BotState, territory:int)-> float
     adjacent_strength = scale(adjacent_strength, input_min=0, input_max=100, output_min=0, output_max=30)
     continent_importance = scale(continent_importance, input_min=0, input_max=7, output_min=0, output_max=10)
 
-    threat = army_strength + adjacent_strength + continent_importance + strategic_position
+    threat = adjacent_strength + continent_importance + strategic_position - army_strength
 
-    return threat / 100
+    return threat / 50
 
 
 def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistributeTroops) -> MoveDistributeTroops:
@@ -263,61 +274,36 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
         'AF': [32, 33, 34, 35, 36, 37]
     }
 
-    unclaimed_territories = game.state.get_territories_owned_by(None)
     my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
-    claimed_territories = set(range(41)) - set(unclaimed_territories)
-    # find continents that can almost be taken over by us
-    my_continents = set()
-    for continent, territories in continents.items():
-        if set(territories) & set(my_territories):
-            my_continents.add(continent)
-
-    
-    # We will distribute troops across our border territories.
     total_troops = game.state.me.troops_remaining
     distributions = defaultdict(lambda: 0)
-    border_territories = game.state.get_all_border_territories(
-        game.state.get_territories_owned_by(game.state.me.player_id)
-    )
+    border_territories = game.state.get_all_border_territories(my_territories)
 
-    # We need to remember we have to place our matching territory bonus
-    # if we have one.
+    # We neeed to remember we have to place our matching territory bonus if we have one.
     if len(game.state.me.must_place_territory_bonus) != 0:
         assert total_troops >= 2
         distributions[game.state.me.must_place_territory_bonus[0]] += 2
         total_troops -= 2
 
+    # Calculate threat levels for all border territories
+    threat_levels = {territory: get_threat_territory(game, bot_state, territory) for territory in border_territories}
 
-    # We will equally distribute across border territories in the early game,
-    # but start doomstacking in the late game.
-    if len(game.state.recording) < 4000:
-        troops_per_territory = total_troops // len(border_territories)
-        leftover_troops = total_troops % len(border_territories)
-        for territory in border_territories:
-            distributions[territory] += troops_per_territory
+    # Sort territories by threat leveel in descending order
+    sorted_territories = sorted(threat_levels.items(), key=lambda x: x[1], reverse=True)
+
+    # Allocate troops to the top 3 most threatened territories
+    top_territories = sorted_territories[:3]
+    for territory, threat in top_territories:
+        if total_troops <= 0:
+            break
+        distributions[territory] += total_troops // len(top_territories)
     
-        # The leftover troops will be put some territory (we don't care)
-        distributions[border_territories[0]] += leftover_troops
-    
-    else:
-        my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
-        weakest_players = sorted(game.state.players.values(), key=lambda x: sum(
-            [game.state.territories[y].troops for y in game.state.get_territories_owned_by(x.player_id)]
-        ))
-
-        for player in weakest_players:
-            bordering_enemy_territories = set(game.state.get_all_adjacent_territories(my_territories)) & set(game.state.get_territories_owned_by(player.player_id))
-            if len(bordering_enemy_territories) > 0:
-                print("my territories", [game.state.map.get_vertex_name(x) for x in my_territories])
-                print("bordering enemies", [game.state.map.get_vertex_name(x) for x in bordering_enemy_territories])
-                print("adjacent to target", [game.state.map.get_vertex_name(x) for x in game.state.map.get_adjacent_to(list(bordering_enemy_territories)[0])])
-                selected_territory = list(set(game.state.map.get_adjacent_to(list(bordering_enemy_territories)[0])) & set(my_territories))[0]
-                distributions[selected_territory] += total_troops
-                break
-
+    # Allocate any remaining troops
+    remaining_troops = total_troops % len(top_territories)
+    for i in range(remaining_troops):
+        distributions[top_territories[i][0]] += 1
 
     return game.move_distribute_troops(query, distributions)
-
 
 def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[MoveAttack, MoveAttackPass]:
     """After the troop phase of your turn, you may attack any number of times until you decide to
