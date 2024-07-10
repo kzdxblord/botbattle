@@ -132,8 +132,6 @@ def handle_claim_territory(game: Game, bot_state: BotState, query: QueryClaimTer
         au_claimed = any(territory in continents['AU'] for territory in claimed_territories)
         af_claimed = any(territory in continents['AF'] for territory in claimed_territories)
 
-        selected_territory = ''
-
         if not na_claimed:
             selected_territory = good_territories['NA'][random.randint(0, 3)]
         elif not sa_claimed:
@@ -142,11 +140,9 @@ def handle_claim_territory(game: Game, bot_state: BotState, query: QueryClaimTer
             selected_territory = good_territories['AU'][0]
         elif not af_claimed:
             selected_territory = good_territories['AF'][0]
-
-        # Or if there are no such territories, we will pick just an unclaimed one with the greatest degree.
-        if selected_territory == "":
+        else:
             selected_territory = sorted(unclaimed_territories, key=lambda x: len(game.state.map.get_adjacent_to(x)), reverse=True)[0]
-
+         # Or if there are no such territories, we will pick just an unclaimed one with the greatest degree.
     return game.move_claim_territory(query, selected_territory)
 
 
@@ -224,8 +220,6 @@ def get_threat_territory(game: Game, bot_state: BotState, territory:int)-> float
         'AF': [32, 33, 34, 35, 36, 37]
     }
 
-    
-
     territory_to_cont = {0: 'NA', 1: 'NA', 2: 'NA', 3: 'NA', 4: 'NA', 5: 'NA', 6: 'NA', 7: 'NA', 8: 'NA',
     9: 'EU', 10: 'EU', 11: 'EU', 12: 'EU', 13: 'EU', 14: 'EU', 15: 'EU', 16: 'AS', 17: 'AS', 18: 'AS', 19: 'AS', 20: 'AS',
     21: 'AS', 22: 'AS', 23: 'AS', 24: 'AS', 25: 'AS', 26: 'AS', 27: 'AS', 28: 'SA', 29: 'SA', 30: 'SA', 31: 'SA', 32: 'AF', 33: 'AF', 34: 'AF',
@@ -249,24 +243,10 @@ def get_threat_territory(game: Game, bot_state: BotState, territory:int)-> float
     army_strength = scale(army_strength)
     adjacent_strength = scale(adjacent_strength, input_min=0, input_max=100, output_min=0, output_max=30)
     continent_importance = scale(continent_importance, input_min=0, input_max=7, output_min=0, output_max=10)
-    
-    
 
     threat = army_strength + adjacent_strength + continent_importance + strategic_position
 
     return threat / 100
-
-    
-
-
-
-    
-        
-
-
-    
-
-
 
 
 def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistributeTroops) -> MoveDistributeTroops:
