@@ -23,8 +23,9 @@ from risk_shared.records.moves.move_place_initial_troop import MovePlaceInitialT
 from risk_shared.records.moves.move_redeem_cards import MoveRedeemCards
 from risk_shared.records.moves.move_troops_after_attack import MoveTroopsAfterAttack
 from risk_shared.records.record_attack import RecordAttack
+from risk_shared.records.record_player_eliminated import PublicRecordPlayerEliminated
 from risk_shared.records.types.move_type import MoveType
-
+import time
 
 # We will store our enemy in the bot state.
 class BotState():
@@ -75,6 +76,20 @@ def main():
         # Send the move to the engine.
         game.send_move(choose_move(query))
                 
+def get_territory_continent(territory_id: int) -> str:
+    """Get the continent of a territory."""
+    continent_map = {
+        'NA': range(0, 9),
+        'EU': range(9, 16),
+        'AS': range(16, 28),
+        'AF': range(32, 38),
+        'AU': range(38, 42),
+        'SA': range(28, 32)
+    }
+    for continent, territory_range in continent_map.items():
+        if territory_id in territory_range:
+            return continent
+    raise ValueError(f"Invalid territory ID: {territory_id}")
 
 def handle_claim_territory(game: Game, bot_state: BotState, query: QueryClaimTerritory) -> MoveClaimTerritory:
     """At the start of the game, you can claim a single unclaimed territory every turn 
@@ -170,6 +185,7 @@ def handle_place_initial_troop(game: Game, bot_state: BotState, query: QueryPlac
 
     return game.move_place_initial_troop(query, max_priority_territory)
 
+    
 
 def handle_redeem_cards(game: Game, bot_state: BotState, query: QueryRedeemCards) -> MoveRedeemCards:
     """Redeem cards in the optimal way to maximize troops and strategic advantage."""
@@ -238,10 +254,10 @@ def get_threat_territory(game: Game, bot_state: BotState, territory:int)-> float
     chokepoints = [0,21,4,10,2,30,29,36,34,22,24,40,15,36]
 
     army_strength = game.state.territories[territory].troops #50
-    adjacent_strength = 0 #30
+    adjacent_strength = 0 #40
     adjacent_territories = game.state.get_all_adjacent_territories([territory]) #
-    continent_importance = continent_bonuses[territory_to_cont[territory]] #10
-    strategic_position = 0 #10
+    continent_importance = continent_bonuses[territory_to_cont[territory]] #5
+    strategic_position = 0 #5
 
     for i in adjacent_territories:
         if i not in my_territories:
@@ -249,11 +265,11 @@ def get_threat_territory(game: Game, bot_state: BotState, territory:int)-> float
             adjacent_strength += strength
     
     if territory in chokepoints:
-        strategic_position = 10
+        strategic_position = 5
 
     army_strength = scale(army_strength)
-    adjacent_strength = scale(adjacent_strength, input_min=0, input_max=100, output_min=0, output_max=30)
-    continent_importance = scale(continent_importance, input_min=0, input_max=7, output_min=0, output_max=10)
+    adjacent_strength = scale(adjacent_strength, input_min=0, input_max=100, output_min=0, output_max=40)
+    continent_importance = scale(continent_importance, input_min=0, input_max=7, output_min=0, output_max=5)
 
     threat = adjacent_strength + continent_importance + strategic_position - army_strength
 
@@ -305,78 +321,249 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
 
     return game.move_distribute_troops(query, distributions)
 
-def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[MoveAttack, MoveAttackPass]:
-    """After the troop phase of your turn, you may attack any number of times until you decide to
-    stop attacking (by passing). After a successful attack, you may move troops into the conquered
-    territory. If you eliminated a player you will get a move to redeem cards and then distribute troops."""
+def calculate_strategic_values(game: Game, my_territories: list[int], border_territories: list[int]) -> dict[int, float]:
+    """Calculate strategic values for territories."""
+    strategic_values = {}
+    for territory in border_territories:
+        # Base strategic value on number of adjacent enemy territories
+        adjacent_territories = game.state.map.get_adjacent_to(territory)
+        enemy_adjacent = sum(1 for adj in adjacent_territories if adj not in my_territories)
+        
+        # Check if it's a chokepoint (has only one friendly adjacent territory)
+        is_chokepoint = sum(1 for adj in adjacent_territories if adj in my_territories) == 1
+        
+        # Check if it's part of a continent we're close to controlling
+        continent = get_territory_continent(territory)
+        continent_control = calculate_continent_control(game, game.state.me.player_id)[continent]
+        
+        # Calculate the strategic value
+        strategic_value = (
+            enemy_adjacent * 0.5 +  # More adjacent enemies increase value
+            (2 if is_chokepoint else 0) +  # Bonus for chokepoints
+            (continent_control * 3)  # Bonus for territories in continents we're close to controlling
+        )
+        
+        strategic_values[territory] = strategic_value
 
-    # We will attack someone.
+    return strategic_values
+
+# Define continents at the module level
+CONTINENTS = {
+    'NA': [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    'SA': [28, 29, 30, 31],
+    'EU': [9, 10, 11, 12, 13, 14, 15],
+    'AS': [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27],
+    'AU': [38, 39, 40, 41],
+    'AF': [32, 33, 34, 35, 36, 37]
+}
+
+def calculate_continent_control(game: Game, player_id: int) -> dict:
+    """Calculate the percentage of each continent controlled by the player."""
+    continent_control = {}
+    player_territories = set(game.state.get_territories_owned_by(player_id))
+    for continent, territories in CONTINENTS.items():
+        control = len(set(territories) & player_territories) / len(territories)
+        continent_control[continent] = control
+    return continent_control
+
+def evaluate_attack_opportunity(game: Game, attacker: int, defender: int) -> float:
+    """Evaluate the opportunity of an attack based on various factors."""
+    attacker_troops = game.state.territories[attacker].troops
+    defender_troops = game.state.territories[defender].troops
+    
+    # Basic troop advantage
+    troop_advantage = (attacker_troops - defender_troops) / max(defender_troops, 1)
+    
+    # Continental control factor
+    attacker_continents = calculate_continent_control(game, game.state.territories[attacker].occupier) # type: ignore
+    defender_continents = calculate_continent_control(game, game.state.territories[defender].occupier) # type: ignore
+    
+    # Get the continent of the defending territory
+    defending_continent = get_territory_continent(defender)
+    
+    # Calculate the difference in control for the relevant continent
+    continent_factor = attacker_continents[defending_continent] - defender_continents[defending_continent]
+    
+    # Strategic value of the defending territory
+    strategic_value = len(game.state.map.get_adjacent_to(defender)) / 6  # Normalize by max possible connections
+    
+    # Bonus for completing a continent
+    continent_completion_bonus = 0
+    territories_in_continent = len(CONTINENTS[defending_continent])
+    if defender_continents[defending_continent] == (territories_in_continent - 1) / territories_in_continent:
+        continent_completion_bonus = 0.5  # Significant bonus for potentially completing a continent
+    
+    # Combine factors (weights can be adjusted)
+    opportunity_score = (
+        0.4 * troop_advantage +
+        0.3 * continent_factor +
+        0.2 * strategic_value +
+        0.1 * continent_completion_bonus
+    )
+    
+    return opportunity_score
+
+def find_best_attack(game: Game) -> Union[tuple[int, int], None]:
+    """Find the best attack opportunity."""
     my_territories = game.state.get_territories_owned_by(game.state.me.player_id)
-    bordering_territories = game.state.get_all_adjacent_territories(my_territories)
+    best_score = float('-inf')
+    best_attack = None
+    
+    for attacker in my_territories:
+        if game.state.territories[attacker].troops > 1:
+            adjacent_enemies = set(game.state.map.get_adjacent_to(attacker)) - set(my_territories)
+            for defender in adjacent_enemies:
+                score = evaluate_attack_opportunity(game, attacker, defender)
+                if score > best_score:
+                    best_score = score
+                    best_attack = (attacker, defender)
+    
+    return best_attack if best_score > 0 else None
 
-    def attack_weakest(territories: list[int]) -> Optional[MoveAttack]:
-        # We will attack the weakest territory from the list.
-        territories = sorted(territories, key=lambda x: game.state.territories[x].troops)
-        for candidate_target in territories:
-            candidate_attackers = sorted(list(set(game.state.map.get_adjacent_to(candidate_target)) & set(my_territories)), key=lambda x: game.state.territories[x].troops, reverse=True)
-            for candidate_attacker in candidate_attackers:
-                if game.state.territories[candidate_attacker].troops > 1:
-                    return game.move_attack(query, candidate_attacker, candidate_target, min(3, game.state.territories[candidate_attacker].troops - 1))
+def calculate_player_strength(game: Game, player_id: int) -> int:
+    """Calculate the total strength of a player's army."""
+    return sum(game.state.territories[t].troops for t in game.state.get_territories_owned_by(player_id))
 
+def calculate_border_strength(game: Game, player_id: int) -> float:
+    """Calculate the average strength of a player's border territories."""
+    border_territories = game.state.get_all_border_territories(game.state.get_territories_owned_by(player_id))
+    if not border_territories:
+        return 0
+    return sum(game.state.territories[t].troops for t in border_territories) / len(border_territories)
 
-    if len(game.state.recording) < 4000:
-        # We will check if anyone attacked us in the last round.
-        new_records = game.state.recording[game.state.new_records:]
-        enemy = None
-        for record in new_records:
-            match record:
-                case MoveAttack() as r:
-                    if r.defending_territory in set(my_territories):
-                        enemy = r.move_by_player
+def get_strongest_enemy(game: Game) -> int:
+    """Identify the strongest enemy player."""
+    player_strengths = {
+        player_id: calculate_player_strength(game, player_id)
+        for player_id in game.state.players if player_id != game.state.me.player_id
+    }
+    return max(player_strengths, key=player_strengths.get) # type: ignore
 
-        # If we don't have an enemy yet, or we feel angry, this player will become our enemy.
-        if enemy != None:
-            if bot_state.enemy == None or random.random() < 0.05:
-                bot_state.enemy = enemy
-        
-        # If we have no enemy, we will pick the player with the weakest territory bordering us, and make them our enemy.
-        else:
-            weakest_territory = min(bordering_territories, key=lambda x: game.state.territories[x].troops)
-            bot_state.enemy = game.state.territories[weakest_territory].occupier
-            
-        # We will attack their weakest territory that gives us a favourable battle if possible.
-        enemy_territories = list(set(bordering_territories) & set(game.state.get_territories_owned_by(enemy)))
-        move = attack_weakest(enemy_territories)
-        if move != None:
-            return move
-        
-        # Otherwise we will attack anyone most of the time.
-        if random.random() < 0.8:
-            move = attack_weakest(bordering_territories)
-            if move != None:
-                return move
+def has_valid_attacks(game: Game) -> bool:
+    """Check if there are any valid attacks available."""
+    my_border_territories = game.state.get_all_border_territories(game.state.get_territories_owned_by(game.state.me.player_id))
+    
+    for territory in my_border_territories:
+        if game.state.territories[territory].troops > 1:
+            adjacent_territories = game.state.map.get_adjacent_to(territory)
+            for adjacent in adjacent_territories:
+                if game.state.territories[adjacent].occupier != game.state.me.player_id:
+                    return True
+    return False
 
-    # In the late game, we will attack anyone adjacent to our strongest territories (hopefully our doomstack).
-    else:
-        strongest_territories = sorted(my_territories, key=lambda x: game.state.territories[x].troops, reverse=True)
-        for territory in strongest_territories:
-            move = attack_weakest(list(set(game.state.map.get_adjacent_to(territory)) - set(my_territories)))
-            if move != None:
-                return move
+def should_continue_attacking(game: Game) -> bool:
+    """Decide whether to continue attacking, with a more aggressive approach."""
+    if not has_valid_attacks(game):
+        return False
 
+    my_strength = calculate_player_strength(game, game.state.me.player_id)
+    strongest_enemy_id = get_strongest_enemy(game)
+    enemy_strength = calculate_player_strength(game, strongest_enemy_id)
+
+    my_territories = len(game.state.get_territories_owned_by(game.state.me.player_id))
+    total_territories = len(game.state.territories)
+    control_percentage = my_territories / total_territories
+
+    # Increased base probability for more aggression
+    attack_probability = 0.7 + (0.15 * (my_strength / max(enemy_strength, 1) - 1))
+    
+    # Adjust based on game phase, encouraging more attacks in early and mid-game
+    if control_percentage < 0.3:  # Early game
+        attack_probability += 0.2
+    elif control_percentage < 0.6:  # Mid game
+        attack_probability += 0.1
+    
+    return random.random() < max(0, min(1, attack_probability))
+
+def quick_evaluate_attack(game: Game, attacker: int, defender: int) -> float:
+    """Quickly evaluate the opportunity of an attack, favoring aggression."""
+    attacker_troops = game.state.territories[attacker].troops
+    defender_troops = game.state.territories[defender].troops
+    
+    # More aggressive troop advantage calculation
+    troop_advantage = (attacker_troops - defender_troops) / max(defender_troops, 1)
+    
+    # Quick strategic value calculation
+    strategic_value = len(game.state.map.get_adjacent_to(defender)) / 6
+    
+    # Bonus for attacking weaker territories
+    weakness_bonus = 1 / max(defender_troops, 1)
+    
+    # Combine factors with weights favoring aggression
+    return troop_advantage * 0.5 + strategic_value * 0.3 + weakness_bonus * 0.2
+
+def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[MoveAttack, MoveAttackPass]:
+    """Improved attack strategy with more aggressive approach."""
+    start_time = time.time()
+    max_time = 0.5
+    max_attempts = 15  # Increased from 10 to allow more attack attempts
+
+    for _ in range(max_attempts):
+        if time.time() - start_time > max_time:
+            return game.move_attack_pass(query)
+
+        if not should_continue_attacking(game):
+            return game.move_attack_pass(query)
+
+        best_attack = find_best_attack(game)
+        if best_attack:
+            attacker, defender = best_attack
+            # More aggressive: always attack with maximum troops
+            attack_troops = min(3, game.state.territories[attacker].troops - 1)
+            return game.move_attack(query, attacker, defender, attack_troops)
+    
     return game.move_attack_pass(query)
 
 
+def calculate_frontier_pressure(game: Game, territory_id: int) -> float:
+    """Calculate the pressure on a territory from enemy troops in adjacent territories."""
+    adjacent_territories = game.state.map.get_adjacent_to(territory_id)
+    enemy_troops = sum(
+        game.state.territories[adj].troops
+        for adj in adjacent_territories
+        if game.state.territories[adj].occupier != game.state.me.player_id
+    )
+    return enemy_troops / len(adjacent_territories) if adjacent_territories else 0
+
+def continent_completion_factor(game: Game, territory_id: int) -> float:
+    """Calculate how close we are to completing the continent of the given territory."""
+    continent = get_territory_continent(territory_id)
+    continent_territories = [t for t in game.state.territories if get_territory_continent(t) == continent]
+    owned_territories = [t for t in continent_territories if game.state.territories[t].occupier == game.state.me.player_id]
+    return len(owned_territories) / len(continent_territories)
+
 def handle_troops_after_attack(game: Game, bot_state: BotState, query: QueryTroopsAfterAttack) -> MoveTroopsAfterAttack:
-    """After conquering a territory in an attack, you must move troops to the new territory."""
+    """Decide how many troops to move after a successful attack."""
     
-    # First we need to get the record that describes the attack, and then the move that specifies
-    # which territory was the attacking territory.
     record_attack = cast(RecordAttack, game.state.recording[query.record_attack_id])
     move_attack = cast(MoveAttack, game.state.recording[record_attack.move_attack_id])
+    
+    attacking_territory = move_attack.attacking_territory
+    conquered_territory = move_attack.defending_territory
+    available_troops = game.state.territories[attacking_territory].troops - 1
 
-    # We will always move the maximum number of troops we can.
-    return game.move_troops_after_attack(query, game.state.territories[move_attack.attacking_territory].troops - 1)
+    # Calculate strategic factors
+    frontier_pressure = calculate_frontier_pressure(game, conquered_territory)
+    completion_factor = continent_completion_factor(game, conquered_territory)
+    
+    # Base troops to move
+    base_troops = max(3, int(available_troops * 0.8))  # Move at least 3 troops or 60% of available
+
+    # Adjust based on frontier pressure
+    pressure_adjustment = int(frontier_pressure * 1.5)  # Increase troops if there's high pressure
+    
+    # Adjust based on continent completion
+    completion_adjustment = int(completion_factor * available_troops * 0.3)  # Move more if close to completing continent
+    
+    # Calculate final number of troops to move
+    troops_to_move = min(
+        available_troops,
+        base_troops + pressure_adjustment + completion_adjustment
+    )
+
+    troops_to_move = troops_to_move if available_troops - troops_to_move > 0 else available_troops
+    
+    return game.move_troops_after_attack(query, troops_to_move)
 
 
 def handle_defend(game: Game, bot_state: BotState, query: QueryDefend) -> MoveDefend:
