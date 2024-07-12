@@ -171,13 +171,13 @@ def handle_place_initial_troop(game: Game, bot_state: BotState, query: QueryPlac
     )
 
     # Calculate threat levels for all border territories
-    threat_levels = {territory: get_threat_territory(game, bot_state, territory) for territory in border_territories}
+    strategic_values = {territory: get_threat_territory(game, bot_state, territory) for territory in border_territories}
 
     # Calculate priority scores for each border territory
     priority_scores = {}
     for territory in border_territories:
         troops = game.state.territories[territory].troops
-        threat = threat_levels[territory]
+        threat = strategic_values[territory]
         priority_scores[territory] = threat / (troops + 1)  # Adding 1 to avoid division by zero
 
     # Find the territory with the highest priority score
@@ -301,33 +301,36 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
         distributions[game.state.me.must_place_territory_bonus[0]] += 2
         total_troops -= 2
 
-    # Calculate threat levels for all border territories
-    threat_levels = {territory: get_threat_territory(game, bot_state, territory) for territory in border_territories}
+    # Calculate strategic values for all border territories
+    strategic_values = calculate_strategic_values(game, bot_state, my_territories)
 
-    # Sort territories by threat leveel in descending order
-    sorted_territories = sorted(threat_levels.items(), key=lambda x: x[1], reverse=True)
+    # Sort territories by strategic value in descending order
+    sorted_territories = sorted(strategic_values.items(), key=lambda x: x[1], reverse=True)
 
-    # Allocate troops to the top 3 most threatened territories
-    top_territories = sorted_territories[:3]
-    for territory, threat in top_territories:
-        if total_troops <= 0:
-            break
-        distributions[territory] += total_troops // len(top_territories)
-    
-    # Allocate any remaining troops
-    remaining_troops = total_troops % len(top_territories)
-    for i in range(remaining_troops):
-        distributions[top_territories[i][0]] += 1
+    # Allocate troops based on strategic value
+    while total_troops > 0:
+        for territory, _ in sorted_territories:
+            if total_troops == 0:
+                break
+            
+            troops_to_place = min(max(1, total_troops // 3), total_troops)
+
+            if territory in border_territories:
+                troops_to_place = min(troops_to_place + 1, total_troops)
+
+            distributions[territory] += troops_to_place
+            total_troops -= troops_to_place
+   
 
     return game.move_distribute_troops(query, distributions)
 
-def calculate_strategic_values(game: Game, my_territories: list[int], border_territories: list[int]) -> dict[int, float]:
+def calculate_strategic_values(game: Game, bot_state: BotState, my_territories: list[int]) -> dict[int, float]:
     """Calculate strategic values for territories."""
     strategic_values = {}
-    for territory in border_territories:
+    for territory in my_territories:
         # Base strategic value on number of adjacent enemy territories
         adjacent_territories = game.state.map.get_adjacent_to(territory)
-        enemy_adjacent = sum(1 for adj in adjacent_territories if adj not in my_territories)
+        enemy_adjacent = sum(1 for adj in adjacent_territories if game.state.territories[adj].occupier != game.state.me.player_id)
         
         # Check if it's a chokepoint (has only one friendly adjacent territory)
         is_chokepoint = sum(1 for adj in adjacent_territories if adj in my_territories) == 1
@@ -336,11 +339,15 @@ def calculate_strategic_values(game: Game, my_territories: list[int], border_ter
         continent = get_territory_continent(territory)
         continent_control = calculate_continent_control(game, game.state.me.player_id)[continent]
         
+        # Consider the threat level
+        threat_level = get_threat_territory(game, bot_state, territory)
+        
         # Calculate the strategic value
         strategic_value = (
-            enemy_adjacent * 0.5 +  # More adjacent enemies increase value
-            (2 if is_chokepoint else 0) +  # Bonus for chokepoints
-            (continent_control * 3)  # Bonus for territories in continents we're close to controlling
+            enemy_adjacent * 0.3 +  # More adjacent enemies increase value
+            (1.5 if is_chokepoint else 0) +  # Bonus for chokepoints
+            (continent_control * 2) +  # Bonus for territories in continents we're close to controlling
+            (threat_level * 0.5)  # Consider threat level, but with less weight
         )
         
         strategic_values[territory] = strategic_value
@@ -465,7 +472,7 @@ def should_continue_attacking(game: Game) -> bool:
     control_percentage = my_territories / total_territories
 
     # Increased base probability for more aggression
-    attack_probability = 0.7 + (0.15 * (my_strength / max(enemy_strength, 1) - 1))
+    attack_probability = 0.5 + (0.15 * (my_strength / max(enemy_strength, 1) - 1))
     
     # Adjust based on game phase, encouraging more attacks in early and mid-game
     if control_percentage < 0.3:  # Early game
@@ -496,7 +503,7 @@ def handle_attack(game: Game, bot_state: BotState, query: QueryAttack) -> Union[
     """Improved attack strategy with more aggressive approach."""
     start_time = time.time()
     max_time = 0.5
-    max_attempts = 15  # Increased from 10 to allow more attack attempts
+    max_attempts = 100  # Increased from 10 to allow more attack attempts
 
     for _ in range(max_attempts):
         if time.time() - start_time > max_time:
@@ -567,18 +574,74 @@ def handle_troops_after_attack(game: Game, bot_state: BotState, query: QueryTroo
 
 
 def handle_defend(game: Game, bot_state: BotState, query: QueryDefend) -> MoveDefend:
-    """If you are being attacked by another player, you must choose how many troops to defend with."""
-
-    # We will always defend with the most troops that we can.
-
-    # First we need to get the record that describes the attack we are defending against.
-    move_attack = cast(MoveAttack, game.state.recording[query.move_attack_id])
-    defending_territory = move_attack.defending_territory
+    """Decide how many troops to defend with based on various strategic factors."""
     
-    # We can only defend with up to 2 troops, and no more than we have stationed on the defending
-    # territory.
-    defending_troops = min(game.state.territories[defending_territory].troops, 2)
-    return game.move_defend(query, defending_troops)
+    move_attack = cast(MoveAttack, game.state.recording[query.move_attack_id])
+    attacking_territory = move_attack.attacking_territory
+    defending_territory = move_attack.defending_territory
+    attacking_troops = move_attack.attacking_troops
+    
+    # Get the number of troops we have on the defending territory
+    our_troops = game.state.territories[defending_territory].troops
+    
+    # Calculate the importance of the defending territory
+    territory_importance = calculate_territory_importance(game, defending_territory)
+    
+    # Calculate the risk of losing the territory
+    loss_risk = calculate_loss_risk(attacking_troops, our_troops)
+    
+    # Determine the optimal number of troops to defend with
+    if our_troops == 1:
+        # We have no choice but to defend with 1 troop
+        troops_to_defend = 1
+    elif our_troops == 2:
+        # Decide whether to defend with 1 or 2 troops based on territory importance and loss risk
+        troops_to_defend = 2 if (territory_importance > 0.5 or loss_risk > 0.7) else 1
+    else:
+        # We have the option to defend with up to 2 troops
+        if territory_importance > 0.8 or loss_risk > 0.9:
+            troops_to_defend = 2
+        elif territory_importance > 0.5 or loss_risk > 0.6:
+            troops_to_defend = 2 if random.random() < 0.7 else 1  # 70% chance to defend with 2
+        else:
+            troops_to_defend = 1
+    
+    return game.move_defend(query, troops_to_defend)
+
+def calculate_territory_importance(game: Game, territory_id: int) -> float:
+    """Calculate the strategic importance of a territory."""
+    continent = get_territory_continent(territory_id)
+    continent_control = calculate_continent_control(game, game.state.me.player_id)[continent]
+    
+    # Check if it's a chokepoint
+    adjacent_territories = game.state.map.get_adjacent_to(territory_id)
+    friendly_adjacent = sum(1 for adj in adjacent_territories if game.state.territories[adj].occupier == game.state.me.player_id)
+    is_chokepoint = friendly_adjacent == 1
+    
+    # Calculate importance based on various factors
+    importance = (
+        0.3 * continent_control +  # Higher importance if we control more of the continent
+        0.3 * (1 - continent_control) +  # Also important if we're trying to gain control
+        0.2 * (len(adjacent_territories) / 6) +  # More connections = more important
+        0.2 * (2 if is_chokepoint else 1)  # Bonus for chokepoints
+    )
+    
+    return min(1.0, importance)  # Ensure the value is between 0 and 1
+
+def calculate_loss_risk(attacking_troops: int, defending_troops: int) -> float:
+    """Calculate the risk of losing the territory based on troop numbers."""
+    # These probabilities are approximate and could be fine-tuned with more accurate calculations
+    if defending_troops == 1:
+        return 0.7 if attacking_troops >= 2 else 0.4
+    elif defending_troops == 2:
+        if attacking_troops == 1:
+            return 0.25
+        elif attacking_troops == 2:
+            return 0.45
+        else:
+            return 0.65
+    else:
+        return 0.0  # This shouldn't happen in Risk, but just in case
 
 
 def handle_fortify(game: Game, bot_state: BotState, query: QueryFortify) -> Union[MoveFortify, MoveFortifyPass]:
