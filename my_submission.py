@@ -301,26 +301,23 @@ def handle_distribute_troops(game: Game, bot_state: BotState, query: QueryDistri
         distributions[game.state.me.must_place_territory_bonus[0]] += 2
         total_troops -= 2
 
-    # Calculate strategic values for all border territories
-    strategic_values = calculate_strategic_values(game, bot_state, my_territories)
+    # Calculate threat levels for all border territories
+    threat_levels = {territory: get_threat_territory(game, bot_state, territory) for territory in border_territories}
 
-    # Sort territories by strategic value in descending order
-    sorted_territories = sorted(strategic_values.items(), key=lambda x: x[1], reverse=True)
+    # Sort territories by threat leveel in descending order
+    sorted_territories = sorted(threat_levels.items(), key=lambda x: x[1], reverse=True)
 
-    # Allocate troops based on strategic value
-    while total_troops > 0:
-        for territory, _ in sorted_territories:
-            if total_troops == 0:
-                break
-            
-            troops_to_place = min(max(1, total_troops // 3), total_troops)
-
-            if territory in border_territories:
-                troops_to_place = min(troops_to_place + 1, total_troops)
-
-            distributions[territory] += troops_to_place
-            total_troops -= troops_to_place
-   
+    # Allocate troops to the top 3 most threatened territories
+    top_territories = sorted_territories[:3]
+    for territory, threat in top_territories:
+        if total_troops <= 0:
+            break
+        distributions[territory] += total_troops // len(top_territories)
+    
+    # Allocate any remaining troops
+    remaining_troops = total_troops % len(top_territories)
+    for i in range(remaining_troops):
+        distributions[top_territories[i][0]] += 1
 
     return game.move_distribute_troops(query, distributions)
 
@@ -472,7 +469,7 @@ def should_continue_attacking(game: Game) -> bool:
     control_percentage = my_territories / total_territories
 
     # Increased base probability for more aggression
-    attack_probability = 0.5 + (0.15 * (my_strength / max(enemy_strength, 1) - 1))
+    attack_probability = 0.6 + (0.15 * (my_strength / max(enemy_strength, 1) - 1))
     
     # Adjust based on game phase, encouraging more attacks in early and mid-game
     if control_percentage < 0.3:  # Early game
