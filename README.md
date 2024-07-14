@@ -1,29 +1,39 @@
-# Risk Game Engine
+Team: The Bots
 
-This repository contains the game engine for SYNCS Bot Battle 2024. This year, we're playing Risk: Global Domination.
+New helper functions created: 
 
-# Repository Structure
 
-`example_submissions`
-This folder contains examples that you can use to help design your own bot.
+Get_territory_continent: returns the continent name based on the territory id
+Scale: used for scaling weights when getting the threat value of territories (see helper function 3)
+Get_threat_territory: assesses a territory’s threat based on number of troops in the territory, number of enemy troops in adjacent territories, whether the territory is in a chokepoint, and it’s continent importance. Returns a threat value from 0 to 1
+Calculate_strategic_value: based on number of adjacent enemy territories, whether the territory is in a chokepoint or part of a continent that we are close to controlling, and threat level (func. 3)
+Calculate_continent_control: Used in previous function. Returns a percentage indicating continental control
+Evaluate_attack_opportunity: considers difference in strength of troops, continental control, and strategic value. Returns a float indicating attack opportunity
+Find_best_attack: calls previous function for all territories. Best attack has highest attack opportunity value
+Calculate_player_strength: gets the total number of troops 
+Calculate_border_strength: gets the number of troops on borders
+Get_strongest_enemy: returns player id of strongest player based on func. 8
+Has_valid_attacks: returns true if player can continue legally attacking
+Should_continue_attacking: considers player strength, enemy strength, and the strongest enemy to assess when to stop attacking
+Quick_evaluate_attack: similar to func. 6, but uses a weakness factor (how weak the territory is in comparison to the attacking territory)  instead of continental control
+Calculate_frontier_pressure: assesses how much enemy pressure is on a territory (how easy the territory is to be captured by enemies)
+Calculate_loss_risk: determines probability of winning a battle (based on troops numbers)
 
-`risk-shared`
-The risk-shared package contains python code and classes that are used in both the `risk-engine` and `risk-helper` packages.
+Overview of strategy: 
 
-`risk-engine`
-The risk-engine package contains the game engine which is used to run matches and determine the winner of a match by simulating the game.
+Territory claim phase: Gets a list of available territories, and prioritizes getting territories that are both adjacent and would give a continent bonus. If this is not possible, a territory with the highest strategic value is chosen instead
 
-`risk-helper`
-The risk-helper package contains a helper library you can use to greatly simplify interactions with the game engine.
+Placing initial troops: The strategic value of bordering territories are calculated. Territories with the highest values are given troops
 
-# Guide
+Redeeming cards: idk
 
-This guide will explain how to create your own submission and run simulations on your own computer, this guide is designed for Linux, WSL2, or MacOS.
+Distributing troops: Calculates threat level of bordering territories. Gives troops to 3 most threatened territories. Remaining troops are distributed to the remaining threatened territories
 
-1. Run `chmod u+x setup_env.sh`, this will give execute permissions to the script so that you can run it.
-2. Run `./setup_env.sh`, this will install the `risk-engine`, `risk-shared` and `risk-helper` packages.
-3. Make a copy of an example submission such as `example_submissions/simple.py` and place it somewhere you want (we will assume you have placed it at `./my_submission.py`). Make any modifications to this file that you want to design your bot.
-4. To simulate a match, use the `match_simulator.py` script. For example we could run `python3 match_simulator.py --submissions 4:example_submissions/simple.py 1:my_submission.py --engine` to simulate a match between our submission and four of the simple example submissions.
+Attacking: Find the best attack based on strength of troops, opportunity to get a continent bonus, number of enemy troops, and threat level. Next best attack is calculated, and assesses whether it is worth continuing to attack. 
 
-Now you can simulate matches on your own device. We will briefly explain the new folders that are created when you run the `match_simulator.py` script. The folders `submission0` to `submission4` contain the code for each player in the simulated game, as well as two special files (FIFO pipes) that are used to communicate to and from the engine (these are `to_engine.pipe` and `from_engine.pipe`). 
-The `input` folder contains `catalog.json`. The `output` folder contains the results of the game, `results.json` describes who won if the game was successful, otherwise it may describe who was banned or why the match was cancelled. The `game.json` file contains the game recording, which is the same data displayed on the website in the match history page. The `visualiser_backwards_differential.json` and `visualiser_forwards_differential.json` are used to generate the map visualisation on the website. The `submission_x.err` and `submission_x.log` are the STDERR and STDOUT of each submission respectively.
+Distributing troops after an attack: Assesses how many troops to distribute based on  pressure from enemy territories, and how close maintaining the territory is to giving us a full continent
+
+Defending: Determines how important keeping the territory is, and the probability of success based on the number of troops we possess in the territory. If it is not that important we defend with 1. Otherwise, we defend with 2. 
+
+Fortifying: Untouched from complex_example
+
