@@ -40,7 +40,7 @@ Territory claim phase: Gets a list of available territories, and prioritizes get
 
 Placing initial troops: The strategic value of bordering territories are calculated. Territories with the highest values are given troops
 
-Redeeming cards: idk
+Redeeming cards: Redeems sets of cards in a game to maximize troops and strategic advantage, prioritizes cards from territories owned by the player, and continues redeeming as long as conditions permit, finally returning the list of redeemed card sets.
 
 Distributing troops: Calculates threat level of bordering territories. Gives troops to 3 most threatened territories. Remaining troops are distributed to the remaining threatened territories
 
